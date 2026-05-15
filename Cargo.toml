@@ -6,3 +6,7 @@ description = "A feature-complete QUIC implementation in Rust"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+] }
