@@ -1,0 +1,8 @@
+[package]
+name = "deerquic"
+version = "0.1.0"
+edition = "2021"
+description = "A feature-complete QUIC implementation in Rust"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
