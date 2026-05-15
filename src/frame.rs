@@ -304,7 +304,7 @@ pub fn parse_frame(mut buf: &[u8]) -> Result<(Frame, usize), FrameError> {
             let sequence = read_varint(&mut buf)?;
             let retire_prior_to = read_varint(&mut buf)?;
             let cid_len = read_u8(&mut buf)?;
-            if cid_len < 1 || cid_len > 20 {
+            if !(1..=20).contains(&cid_len) {
                 return Err(FrameError::InvalidCidLength(cid_len));
             }
             let cid_bytes = read_bytes(&mut buf, cid_len as usize)?;
@@ -465,10 +465,7 @@ pub fn write_frame(frame: &Frame, buf: &mut impl BufMut) -> Result<usize, FrameE
             buf.put_u8(FRAME_MAX_DATA);
             put_varint(buf, *maximum)?;
         }
-        Frame::MaxStreamData {
-            stream_id,
-            maximum,
-        } => {
+        Frame::MaxStreamData { stream_id, maximum } => {
             buf.put_u8(FRAME_MAX_STREAM_DATA);
             put_varint(buf, *stream_id)?;
             put_varint(buf, *maximum)?;
@@ -648,13 +645,7 @@ mod tests {
         round_trip(Frame::Ack {
             largest_ack: 200,
             ack_delay: 10,
-            ranges: vec![
-                AckRange { gap: 0, range: 3 },
-                AckRange {
-                    gap: 2,
-                    range: 4,
-                },
-            ],
+            ranges: vec![AckRange { gap: 0, range: 3 }, AckRange { gap: 2, range: 4 }],
             ecn: Some(EcnCounts {
                 ect0: 1,
                 ect1: 2,
@@ -793,7 +784,7 @@ mod tests {
     #[test]
     fn round_trip_connection_close_quic() {
         round_trip(Frame::ConnectionClose {
-            error_code: 0x0a, // PROTOCOL_VIOLATION
+            error_code: 0x0a,       // PROTOCOL_VIOLATION
             frame_type: Some(0x06), // triggered by a CRYPTO frame
             reason: Bytes::from_static(b"bad crypto frame"),
         });

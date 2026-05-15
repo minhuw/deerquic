@@ -242,7 +242,7 @@ pub fn parse_long_header(buf: &[u8]) -> Result<(LongHeader, usize), PacketError>
     pos += n;
 
     // Packet Number field. Length = pn_len_bits + 1.
-    let pn_len = pn_len_bits as u8 + 1;
+    let pn_len = pn_len_bits + 1;
     ensure(buf, pos + pn_len as usize)?;
 
     let truncated_pn = read_pn(&buf[pos..], pn_len);
@@ -440,10 +440,7 @@ pub fn write_long_header(hdr: &LongHeader, buf: &mut impl BufMut) -> Result<usiz
 }
 
 /// Write a short header into `buf`. Returns bytes written.
-pub fn write_short_header(
-    hdr: &ShortHeader,
-    buf: &mut impl BufMut,
-) -> Result<usize, PacketError> {
+pub fn write_short_header(hdr: &ShortHeader, buf: &mut impl BufMut) -> Result<usize, PacketError> {
     let start = buf.remaining_mut();
 
     let first = 0x40 // Fixed Bit

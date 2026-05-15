@@ -155,17 +155,7 @@ mod tests {
     #[test]
     fn round_trip_boundaries() {
         let cases = &[
-            0,
-            1,
-            63,
-            64,
-            255,
-            16383,
-            16384,
-            65535,
-            1073741823,
-            1073741824,
-            VARINT_MAX,
+            0, 1, 63, 64, 255, 16383, 16384, 65535, 1073741823, 1073741824, VARINT_MAX,
         ];
         for &v in cases {
             let mut buf = [0u8; 8];
@@ -191,7 +181,10 @@ mod tests {
     fn rfc_a1_examples() {
         // From RFC 9000 Appendix A.1
         let examples: &[(&[u8], u64)] = &[
-            (&[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c], 151288809941952652),
+            (
+                &[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c],
+                151288809941952652,
+            ),
             (&[0x9d, 0x7f, 0x3e, 0x7d], 494878333),
             (&[0x7b, 0xbd], 15293),
             (&[0x25], 37),
