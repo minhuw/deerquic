@@ -156,8 +156,6 @@ pub struct Endpoint<B: Backend> {
     backend: B,
     send_buf: Vec<u8>,
     recv_buf: Vec<u8>,
-    /// Buffered application data received after the handshake.
-    app_data: Vec<u8>,
 }
 
 impl<B: Backend> Endpoint<B> {
@@ -171,7 +169,6 @@ impl<B: Backend> Endpoint<B> {
             backend,
             send_buf: vec![0u8; Self::MAX_DGRAM],
             recv_buf: vec![0u8; Self::MAX_DGRAM],
-            app_data: Vec::new(),
         }
     }
 
@@ -249,38 +246,16 @@ impl<B: Backend> Endpoint<B> {
 
     /// Send application data (after handshake).
     /// This puts data into a STREAM frame for the next egest.
-    pub fn send_app_data(&mut self, _data: &[u8]) -> Result<(), ConnectionError> {
-        // TODO: proper stream support
+    pub fn send_app_data(&mut self, data: &[u8]) -> Result<(), ConnectionError> {
+        self.conn.send_data(data);
         self.flush_egress()
     }
 
-    /// Try to receive application data. Returns 0 if nothing available.
-    /// Buffers any received data internally.
+    /// Try to receive application data. Returns bytes copied.
     pub fn recv_app_data(&mut self, buf: &mut [u8]) -> Result<usize, ConnectionError> {
-        // First, drain any buffered data
-        if !self.app_data.is_empty() {
-            let n = self.app_data.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.app_data[..n]);
-            self.app_data.drain(..n);
-            return Ok(n);
-        }
-
-        // Poll and recv
-        loop {
-            match self.backend.recv(&mut self.recv_buf) {
-                Ok((0, _)) => break,
-                Ok((n, _addr)) => {
-                    self.conn.ingest(&self.recv_buf[..n])?;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
-        self.flush_egress()?;
-
-        // After processing, check if we have any CRYPTO data (handshake) or
-        // other frames. For now, just return 0. Stream data comes later.
-        Ok(0)
+        // Step to receive any pending packets
+        let _ = self.step(0);
+        Ok(self.conn.recv_data(buf))
     }
 
     pub fn is_established(&self) -> bool {

@@ -66,6 +66,12 @@ pub struct Connection {
     pending_crypto: [Vec<u8>; 3],
     /// Crypto stream receive offset per level (for ordering CRYPTO frames).
     crypto_recv_offset: [u64; 3],
+    /// Application data queued for sending on stream 0.
+    pending_app_data: Vec<u8>,
+    /// Application data received from STREAM frames.
+    received_app_data: Vec<u8>,
+    /// Byte offset for the next STREAM frame we send on stream 0.
+    stream_send_offset: u64,
     close_reason: Option<ConnectionError>,
 }
 
@@ -120,6 +126,9 @@ impl Connection {
                 appdata_space: Space::new(PacketNumberSpace::ApplicationData),
                 pending_crypto: [Vec::new(), Vec::new(), Vec::new()],
                 crypto_recv_offset: [0; 3],
+                pending_app_data: Vec::new(),
+                received_app_data: Vec::new(),
+                stream_send_offset: 0,
                 close_reason: None,
             },
             packet,
@@ -219,6 +228,9 @@ impl Connection {
             appdata_space,
             pending_crypto,
             crypto_recv_offset: [client_hello.len() as u64, 0, 0],
+            pending_app_data: Vec::new(),
+            received_app_data: Vec::new(),
+            stream_send_offset: 0,
             close_reason: None,
         })
     }
@@ -343,7 +355,23 @@ impl Connection {
                 && state == State::Handshaking
             {
                 frames.push(Frame::HandshakeDone);
-                self.state = State::Established; // only send once
+                self.state = State::Established;
+            }
+
+            // Send pending application data on stream 0
+            if pn_space == PacketNumberSpace::ApplicationData
+                && state == State::Established
+                && !self.pending_app_data.is_empty()
+            {
+                let data: Vec<u8> = std::mem::take(&mut self.pending_app_data);
+                let data_len = data.len() as u64;
+                frames.push(Frame::Stream {
+                    stream_id: 0,
+                    offset: self.stream_send_offset,
+                    data: Bytes::from(data),
+                    fin: false,
+                });
+                self.stream_send_offset += data_len;
             }
 
             if frames.is_empty() {
@@ -401,6 +429,19 @@ impl Connection {
 
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Queue application data for sending on stream 0.
+    pub fn send_data(&mut self, data: &[u8]) {
+        self.pending_app_data.extend_from_slice(data);
+    }
+
+    /// Read received application data into `buf`. Returns bytes copied.
+    pub fn recv_data(&mut self, buf: &mut [u8]) -> usize {
+        let n = self.received_app_data.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.received_app_data[..n]);
+        self.received_app_data.drain(..n);
+        n
     }
 }
 
@@ -469,6 +510,9 @@ impl Connection {
                     if self.side == Side::Client {
                         self.state = State::Established;
                     }
+                }
+                Frame::Stream { data, .. } => {
+                    self.received_app_data.extend_from_slice(data);
                 }
                 _ => {} // Other frames not processed yet
             }
@@ -1203,7 +1247,6 @@ mod tests {
             .packet
             .encrypt_in_place(0, b"hdr", &mut enc1)
             .unwrap();
-        let ct1 = enc1.clone();
         enc1.extend_from_slice(t1.as_ref());
 
         let mut enc2 = plaintext.to_vec();

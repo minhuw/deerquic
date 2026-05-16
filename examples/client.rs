@@ -7,6 +7,8 @@ use deerquic::runtime::ep_client;
 use std::env;
 use std::io::{self, Write};
 use std::net::SocketAddr;
+use std::thread;
+use std::time::Duration;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -20,7 +22,6 @@ fn main() -> io::Result<()> {
 
     println!("deerquic client connecting to {}", server_addr);
 
-    // Create client endpoint (binds local port, sends Initial packet)
     let mut client = match ep_client(server_addr, "localhost") {
         Ok(c) => c,
         Err(e) => {
@@ -29,7 +30,6 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // Drive the QUIC handshake
     println!("  Running handshake...");
     match client.handshake() {
         Ok(()) => println!("  Handshake complete!"),
@@ -39,7 +39,27 @@ fn main() -> io::Result<()> {
         }
     }
 
-    println!("Connection established with {}", server_addr);
-    io::stdout().flush().ok();
+    // Ping-pong loop
+    let mut buf = [0u8; 2048];
+    for i in 1..=5 {
+        let msg = format!("ping {}", i);
+        print!("  -> {}", msg);
+        io::stdout().flush().ok();
+
+        client.send_app_data(msg.as_bytes()).unwrap();
+
+        // Wait for response
+        loop {
+            let n = client.recv_app_data(&mut buf).unwrap();
+            if n > 0 {
+                let response = std::str::from_utf8(&buf[..n]).unwrap_or("?");
+                println!("  <- {}", response);
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    println!("Done.");
     Ok(())
 }

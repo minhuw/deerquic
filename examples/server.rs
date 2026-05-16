@@ -8,6 +8,8 @@ use std::env;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 fn test_server_config() -> Arc<rustls::ServerConfig> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -34,14 +36,12 @@ fn main() -> io::Result<()> {
 
     println!("deerquic server listening on {}", bind_addr);
 
-    // Create server socket and wait for client Initial
     let mut backend = EpollBackend::bind(bind_addr).expect("bind");
-    println!("  bound to {}", bind_addr);
+    println!("  bound");
 
-    // Wait for client's Initial packet
     println!("  waiting for client...");
     let mut buf = [0u8; 2048];
-    let (n, client_addr) = loop {
+    let (n, _client_addr) = loop {
         backend.poll(1000).expect("poll");
         match backend.recv(&mut buf) {
             Ok((0, _)) => continue,
@@ -53,19 +53,16 @@ fn main() -> io::Result<()> {
             }
         }
     };
-    println!("  received Initial from {}", client_addr);
 
-    // Create server endpoint (reuse the existing backend)
     let config = test_server_config();
     let mut server = match ep_server(&buf[..n], backend, config) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to create server: {e}");
+            eprintln!("Failed: {e}");
             std::process::exit(1);
         }
     };
 
-    // Drive handshake
     println!("  running handshake...");
     match server.handshake() {
         Ok(()) => println!("  handshake complete!"),
@@ -75,7 +72,19 @@ fn main() -> io::Result<()> {
         }
     }
 
-    println!("Connection established with {}", client_addr);
-    io::stdout().flush().ok();
-    Ok(())
+    // Echo loop
+    let mut buf = [0u8; 2048];
+    loop {
+        let n = server.recv_app_data(&mut buf).unwrap();
+        if n > 0 {
+            let msg = std::str::from_utf8(&buf[..n]).unwrap_or("?");
+            println!("  <- {}", msg);
+
+            let reply = msg.replace("ping", "pong");
+            print!("  -> {}", reply);
+            io::stdout().flush().ok();
+            server.send_app_data(reply.as_bytes()).unwrap();
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
