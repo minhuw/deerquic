@@ -108,22 +108,37 @@ fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
 
     writeln!(log, "handshake complete")?;
 
-    if tc == "transfer" {
+    // Both handshake and transfer serve files via HTTP/0.9
+    {
         let docroot = env::var("DOCUMENT_ROOT").unwrap_or_else(|_| "/www".into());
-        // Handle multiple requests (the runner sends several)
+        let mut idle = 0u32;
         loop {
             let mut req_buf = [0u8; 2048];
-            let req = loop {
+            let mut req = None;
+            loop {
                 let _ = server.step(100);
                 let n = server.conn_mut().recv_data(&mut req_buf);
                 if n > 0 {
-                    break std::str::from_utf8(&req_buf[..n])
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
+                    req = Some(
+                        std::str::from_utf8(&req_buf[..n])
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    );
+                    break;
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            };
+                idle += 1;
+                if idle > 50 {
+                    writeln!(log, "timeout waiting for request")?;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if idle > 50 {
+                break;
+            }
+            idle = 0;
+            let req = req.unwrap_or_default();
 
             if req.is_empty() {
                 writeln!(log, "empty request, done")?;
@@ -144,11 +159,9 @@ fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
             match fs::read(&file_path) {
                 Ok(data) => {
                     writeln!(log, "  serving {} bytes", data.len())?;
-                    // Send in small chunks to fit within QUIC packet limits
                     const CHUNK: usize = 1024;
                     for chunk in data.chunks(CHUNK) {
                         server.conn_mut().send_data(chunk);
-                        // Flush until egest is empty
                         loop {
                             let out_n = server.conn_mut().egest(&mut buf).unwrap_or(0);
                             if out_n == 0 {
@@ -207,11 +220,12 @@ fn run_client(host: &str, port: u16) -> io::Result<()> {
 
     writeln!(log, "handshake complete")?;
 
-    if tc == "transfer" {
+    // Both handshake and transfer download files via HTTP/0.9
+    {
         let dl_root = env::var("DOWNLOAD_ROOT").unwrap_or_else(|_| "/downloads".into());
         let requests = env::var("REQUESTS").unwrap_or_default();
 
-        writeln!(log, "transfer: REQUESTS={requests}")?;
+        writeln!(log, "REQUESTS={requests}")?;
 
         for req_url in requests.split_whitespace() {
             // e.g. "https://server/file1"
@@ -245,7 +259,6 @@ fn run_client(host: &str, port: u16) -> io::Result<()> {
                 } else {
                     silence += 1;
                     if silence > 30 {
-                        // 3 seconds of silence = transfer done
                         break;
                     }
                 }
