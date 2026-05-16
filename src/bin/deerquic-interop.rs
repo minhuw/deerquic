@@ -53,20 +53,16 @@ fn load_server_config(cert_path: &str, key_path: &str) -> io::Result<Arc<rustls:
     ))
 }
 
-fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
+fn run_server(cert_path: &str, key_path: &str, port: u16) -> io::Result<()> {
     let tc = testcase();
     if !is_supported(&tc) {
-        eprintln!("unsupported TESTCASE={}", tc);
         std::process::exit(127);
     }
 
     let config = load_server_config(cert_path, key_path)?;
 
-    let bind_addr: SocketAddr = "[::]:443".parse().unwrap();
-    let mut backend = EpollBackend::bind(bind_addr).map_err(|e| {
-        eprintln!("bind failed: {e}");
-        e
-    })?;
+    let bind_addr: SocketAddr = format!("[::]:{port}").parse().unwrap();
+    let mut backend = EpollBackend::bind(bind_addr)?;
 
     let log_path = format!("/logs/{tc}_server.log");
     let mut log = fs::File::create(&log_path)
@@ -188,7 +184,6 @@ fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
 fn run_client(host: &str, port: u16) -> io::Result<()> {
     let tc = testcase();
     if !is_supported(&tc) {
-        eprintln!("unsupported TESTCASE={}", tc);
         std::process::exit(127);
     }
 
@@ -237,7 +232,7 @@ fn run_client(host: &str, port: u16) -> io::Result<()> {
             writeln!(log, "requesting: {req_line:?}")?;
             client.conn_mut().send_data(req_line.as_bytes());
 
-            // Flush egress
+            // Flush egest
             let mut sbuf = [0u8; 2048];
             loop {
                 let n = client.conn_mut().egest(&mut sbuf).unwrap_or(0);
@@ -284,12 +279,17 @@ fn run_client(host: &str, port: u16) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <server|client> [options]", args[0]);
         std::process::exit(1);
     }
 
     match args[1].as_str() {
         "server" => {
+            let port: u16 = args
+                .iter()
+                .position(|a| a == "--port")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(443);
             let cert_path = args
                 .iter()
                 .position(|a| a == "--cert")
@@ -302,7 +302,7 @@ fn main() -> io::Result<()> {
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/certs/priv.key");
-            run_server(cert_path, key_path)
+            run_server(cert_path, key_path, port)
         }
         "client" => {
             let host = args
@@ -320,7 +320,6 @@ fn main() -> io::Result<()> {
             run_client(host, port)
         }
         _ => {
-            eprintln!("expected 'server' or 'client', got '{}'", args[1]);
             std::process::exit(1);
         }
     }

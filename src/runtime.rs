@@ -50,9 +50,6 @@ impl EpollBackend {
     pub fn new(local_addr: SocketAddr, peer: SocketAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(local_addr)?;
         socket.set_nonblocking(true)?;
-        if peer.port() != 0 {
-            socket.connect(peer)?;
-        }
         let epoll_fd = unsafe { libc::epoll_create1(0) };
         if epoll_fd < 0 {
             return Err(io::Error::last_os_error());
@@ -118,8 +115,6 @@ impl Backend for EpollBackend {
         let (n, addr) = self.socket.recv_from(buf)?;
         if self.peer.is_none() {
             self.peer = Some(addr);
-            // Connect so send() works without specifying addr
-            let _ = self.socket.connect(addr);
         }
         Ok((n, addr))
     }
