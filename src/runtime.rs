@@ -180,6 +180,10 @@ impl<B: Backend> Endpoint<B> {
         &mut self.conn
     }
 
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
     /// One event loop iteration:
     /// 1. Poll for incoming data
     /// 2. If data available, receive and ingest

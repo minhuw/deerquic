@@ -14,10 +14,14 @@ rustls = { version = "0.23", default-features = false, features = [
   "ring",
   "std",
 ] }
+rustls-pemfile = "2"
 
 [dev-dependencies]
 rcgen = "0.13"
-rustls-pemfile = "2"
+
+[[bin]]
+name = "deerquic-interop"
+path = "src/bin/deerquic-interop.rs"
 
 [[example]]
 name = "client"

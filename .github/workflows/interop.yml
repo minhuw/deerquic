@@ -1,0 +1,52 @@
+name: Interop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  interop-quinn:
+    name: "quinn interop"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Enable IPv6
+        run: sudo modprobe ip6table_filter
+
+      - name: Run quinn interop
+        env:
+          INTEROP_TESTCASES: handshake,transfer
+          INTEROP_PEER_IMPL: quinn
+          INTEROP_PEER_IMAGE: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355
+        run: bash interop/run-official.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs-quinn
+          path: .interop-logs/
