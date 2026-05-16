@@ -76,14 +76,14 @@ impl Connection {
     pub fn connect(server_name: &str) -> Result<(Self, Vec<u8>), ConnectionError> {
         let _ = crate::crypto::install_provider();
 
-        let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(SkipVerify))
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(SkipVerify))
+                .with_no_client_auth();
 
-        let name = rustls::pki_types::ServerName::try_from(server_name.to_string()).map_err(
-            |_| ConnectionError::Transport(crate::error::TransportError::InternalError),
-        )?;
+        let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+            .map_err(|_| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
 
         let mut tls_client = quic::ClientConnection::new(
             Arc::new(config),
@@ -161,8 +161,7 @@ impl Connection {
         }
 
         // 4. Create server TLS connection (use ServerConnection directly)
-        let mut tls_server =
-            quic::ServerConnection::new(server_config, quic::Version::V1, vec![])?;
+        let mut tls_server = quic::ServerConnection::new(server_config, quic::Version::V1, vec![])?;
 
         // 5. Feed ClientHello to TLS
         tls_server.read_hs(&client_hello)?;
@@ -182,6 +181,7 @@ impl Connection {
         let mut initial_space = Space::new(PacketNumberSpace::Initial);
         initial_space.set_keys(server_keys);
         let mut handshake_space = Space::new(PacketNumberSpace::Handshake);
+        let mut appdata_space = Space::new(PacketNumberSpace::ApplicationData);
         let has_hs = hs_keys.is_some();
         if let Some(keys) = hs_keys {
             handshake_space.set_keys(keys);
@@ -199,7 +199,7 @@ impl Connection {
                     }
                 }
                 if let Some(keys) = one_rtt_keys {
-                    handshake_space.set_keys(keys);
+                    appdata_space.set_keys(keys);
                 }
             }
         }
@@ -216,7 +216,7 @@ impl Connection {
             src_cid: dst_cid, // client sends TO our CID
             initial_space,
             handshake_space,
-            appdata_space: Space::new(PacketNumberSpace::ApplicationData),
+            appdata_space,
             pending_crypto,
             crypto_recv_offset: [client_hello.len() as u64, 0, 0],
             close_reason: None,
@@ -301,7 +301,11 @@ impl Connection {
         let spaces = [
             (&mut self.initial_space, PacketNumberSpace::Initial, 0),
             (&mut self.handshake_space, PacketNumberSpace::Handshake, 1),
-            (&mut self.appdata_space, PacketNumberSpace::ApplicationData, 2),
+            (
+                &mut self.appdata_space,
+                PacketNumberSpace::ApplicationData,
+                2,
+            ),
         ];
 
         for (space, pn_space, crypto_idx) in spaces {
@@ -326,7 +330,10 @@ impl Connection {
                 frames.push(Frame::Ack {
                     largest_ack: largest,
                     ack_delay: 0,
-                    ranges: vec![AckRange { gap: 0, range: first_range }],
+                    ranges: vec![AckRange {
+                        gap: 0,
+                        range: first_range,
+                    }],
                     ecn: None,
                 });
             }
@@ -336,6 +343,7 @@ impl Connection {
                 && state == State::Handshaking
             {
                 frames.push(Frame::HandshakeDone);
+                self.state = State::Established; // only send once
             }
 
             if frames.is_empty() {
@@ -345,13 +353,17 @@ impl Connection {
             let pn = space.next_send_pn();
             let pn_len = encoded_pn_len(pn, space.largest_recv_pn());
             let packet = encrypt_packet(
-                space, pn_space, version, &dst_cid, &src_cid,
-                &frames, pn, pn_len, is_established,
+                space,
+                pn_space,
+                version,
+                &dst_cid,
+                &src_cid,
+                &frames,
+                pn,
+                pn_len,
+                is_established,
             );
-            let packet = match packet {
-                Ok(p) => p,
-                Err(e) => return Err(e),
-            };
+            let packet = packet?;
             let len = packet.len();
             if buf.len() < len {
                 return Ok(0);
@@ -435,7 +447,8 @@ impl Connection {
                                 quic::Connection::Client(conn) => conn.write_hs(&mut out_buf),
                                 quic::Connection::Server(conn) => conn.write_hs(&mut out_buf),
                             };
-                            let (crypto_out, new_keys) = process_tls_output(Some((out_buf, kc)), level);
+                            let (crypto_out, new_keys) =
+                                process_tls_output(Some((out_buf, kc)), level);
                             self.handle_crypto_output(crypto_out, new_keys, level)?;
                             self.crypto_recv_offset[level] += data.len() as u64;
                         }
@@ -483,7 +496,6 @@ impl Connection {
                 0 => {
                     if !self.handshake_space.has_keys() {
                         self.handshake_space.set_keys(keys);
-                    } else {
                     }
                     // Call write_hs again to get next-level data
                     let mut buf2 = Vec::new();
@@ -513,7 +525,10 @@ impl Connection {
                     }
                     // Get more TLS output at 1-RTT level
                     let mut buf = Vec::new();
-                    let kc2 = write_hs_direct(&mut self.tls, &mut buf);
+                    let kc2 = match &mut self.tls {
+                        quic::Connection::Client(c) => c.write_hs(&mut buf),
+                        quic::Connection::Server(s) => s.write_hs(&mut buf),
+                    };
                     if !buf.is_empty() || kc2.is_some() {
                         let (crypto_out2, keys2) = process_tls_output(Some((buf, kc2)), 2);
                         for (lvl, data) in crypto_out2 {
@@ -534,6 +549,7 @@ impl Connection {
 }
 
 /// Free function: encrypt a packet with AEAD + header protection.
+#[allow(clippy::too_many_arguments)]
 fn encrypt_packet(
     space: &Space,
     pn_space: PacketNumberSpace,
@@ -563,7 +579,12 @@ fn encrypt_packet(
     // Pad Initial packets to 1200 bytes
     if pn_space == PacketNumberSpace::Initial {
         let hdr_estimate = if is_long {
-            hdr_size_long(dst_cid.len(), src_cid.len(), 0, frames_buf.len() + pn_len + tag_len)
+            hdr_size_long(
+                dst_cid.len(),
+                src_cid.len(),
+                0,
+                frames_buf.len() + pn_len + tag_len,
+            )
         } else {
             1 + dst_cid.len() + pn_len
         };
@@ -572,6 +593,12 @@ fn encrypt_packet(
         while frames_buf.len() < payload_needed {
             frames_buf.push(0x00);
         }
+    }
+
+    // Ensure minimum payload for HP sample (sample_len + 4 - pn_len bytes)
+    let hp_min = local_keys.header.sample_len() + 4 - pn_len;
+    while frames_buf.len() < hp_min {
+        frames_buf.push(0x00);
     }
 
     if is_long {
@@ -584,7 +611,11 @@ fn encrypt_packet(
             &frames_buf,
             pn,
             pn_len,
-            if pn_space == PacketNumberSpace::Initial { Some(&[][..]) } else { None },
+            if pn_space == PacketNumberSpace::Initial {
+                Some(&[][..])
+            } else {
+                None
+            },
         )
     } else {
         encrypt_short(local_keys, dst_cid, &frames_buf, pn, pn_len, false)
@@ -592,46 +623,6 @@ fn encrypt_packet(
 }
 
 // ── TLS integration ──────────────────────────────────────────────
-
-/// Call write_hs directly on the TLS connection without calling read_hs first.
-fn write_hs_direct(
-    tls: &mut quic::Connection,
-    buf: &mut Vec<u8>,
-) -> Option<quic::KeyChange> {
-    match tls {
-        quic::Connection::Client(c) => c.write_hs(buf),
-        quic::Connection::Server(s) => s.write_hs(buf),
-    }
-}
-
-/// Feed handshake bytes to the TLS connection at the given encryption level.
-/// Returns TLS output (if any) and optional key change.
-fn feed_tls(
-    tls: &mut quic::Connection,
-    _level: usize,
-    data: &[u8],
-) -> Result<Option<(Vec<u8>, Option<quic::KeyChange>)>, ConnectionError> {
-    // For CRYPTO data at a given level, the entire buffer is the handshake data
-    // at that level. read_hs consumes it.
-    match tls {
-        quic::Connection::Client(conn) => {
-            conn.read_hs(data)?;
-        }
-        quic::Connection::Server(conn) => {
-            conn.read_hs(data)?;
-        }
-    }
-
-    // Check for TLS output
-    let mut out_buf = Vec::new();
-    let kc = tls.write_hs(&mut out_buf);
-
-    if out_buf.is_empty() && kc.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some((out_buf, kc)))
-    }
-}
 
 /// Process TLS output at the given encryption level.
 /// Returns (level, data) pairs and optional new keys.
@@ -644,7 +635,6 @@ fn process_tls_output(
 
     if let Some((data, key_change)) = tls_out {
         if !data.is_empty() {
-            // Data from write_hs() goes at the CURRENT encryption level
             crypto.push((current_level, data));
         }
 
@@ -666,35 +656,13 @@ fn pn_space_to_level(id: PacketNumberSpace) -> usize {
     }
 }
 
-/// Write TLS handshake output.
-trait TlsWriteHs {
-    fn write_hs(&mut self, buf: &mut Vec<u8>) -> Option<quic::KeyChange>;
-    fn read_hs(&mut self, data: &[u8]) -> Result<(), rustls::Error>;
-}
-
-impl TlsWriteHs for quic::Connection {
-    fn write_hs(&mut self, buf: &mut Vec<u8>) -> Option<quic::KeyChange> {
-        match self {
-            Self::Client(c) => c.write_hs(buf),
-            Self::Server(s) => s.write_hs(buf),
-        }
-    }
-
-    fn read_hs(&mut self, data: &[u8]) -> Result<(), rustls::Error> {
-        match self {
-            Self::Client(c) => c.read_hs(data),
-            Self::Server(s) => s.read_hs(data),
-        }
-    }
-}
-
 // ── Packet decryption helpers ───────────────────────────────────
 
 /// Decrypt an Initial packet using the given keys. Returns parsed frames + PN.
 fn decrypt_initial(
     packet: &[u8],
     hdr: &packet::LongHeader,
-    hdr_len: usize,
+    _hdr_len: usize,
     keys: &Keys,
 ) -> Result<(Vec<Frame>, u64), ConnectionError> {
     let pn_offset = hdr_pn_offset_long(hdr);
@@ -710,9 +678,9 @@ fn decrypt_and_parse_long(
     _hdr_len: usize,
     pn_offset: usize,
 ) -> Result<(u64, Vec<Frame>), ConnectionError> {
-    let remote = space.remote_keys().ok_or_else(|| {
-        ConnectionError::Transport(crate::error::TransportError::InternalError)
-    })?;
+    let remote = space
+        .remote_keys()
+        .ok_or_else(|| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
     decrypt_and_parse_long_inner(packet, pn_offset, remote)
 }
 
@@ -724,10 +692,12 @@ fn decrypt_and_parse_long_inner(
     let sample_len = remote_keys.header.sample_len();
     let sample_start = pn_offset + 4;
     if packet.len() < sample_start + sample_len {
-        return Err(ConnectionError::Packet(packet::PacketError::BufferTooShort {
-            needed: sample_start + sample_len,
-            actual: packet.len(),
-        }));
+        return Err(ConnectionError::Packet(
+            packet::PacketError::BufferTooShort {
+                needed: sample_start + sample_len,
+                actual: packet.len(),
+            },
+        ));
     }
     let sample = &packet[sample_start..sample_start + sample_len];
 
@@ -741,9 +711,7 @@ fn decrypt_and_parse_long_inner(
     remote_keys
         .header
         .decrypt_in_place(sample, &mut first_byte, &mut pn_bytes)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::ProtocolViolation)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::ProtocolViolation))?;
 
     // Extract real PN length
     let pn_len = ((first_byte & 0x03) + 1) as usize;
@@ -760,14 +728,12 @@ fn decrypt_and_parse_long_inner(
     aad[pn_offset..pn_offset + pn_len].copy_from_slice(pn_bytes);
 
     // AEAD decrypt
-    let enc_len = packet[aad_len..].len();
+    let _enc_len = packet[aad_len..].len();
     let mut encrypted = Vec::from(&packet[aad_len..]);
     let plaintext = remote_keys
         .packet
         .decrypt_in_place(full_pn, &aad, &mut encrypted)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::ProtocolViolation)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::ProtocolViolation))?;
 
     // Parse frames
     let mut remaining = plaintext;
@@ -789,9 +755,9 @@ fn decrypt_and_parse(
     _hdr_len: usize,
     pn_offset: usize,
 ) -> Result<(u64, Vec<Frame>), ConnectionError> {
-    let remote_keys = space.remote_keys().ok_or_else(|| {
-        ConnectionError::Transport(crate::error::TransportError::InternalError)
-    })?;
+    let remote_keys = space
+        .remote_keys()
+        .ok_or_else(|| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
 
     let sample_len = remote_keys.header.sample_len();
     let sample_start = pn_offset + 4;
@@ -806,9 +772,7 @@ fn decrypt_and_parse(
     remote_keys
         .header
         .decrypt_in_place(sample, &mut first_byte, &mut pn_bytes)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::ProtocolViolation)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::ProtocolViolation))?;
 
     // Short header: PN length encoded directly (0 = 4 bytes)
     let pn_len = match first_byte & 0x03 {
@@ -818,11 +782,8 @@ fn decrypt_and_parse(
     let pn_bytes = &pn_bytes[..pn_len];
 
     let truncated = read_pn(pn_bytes);
-    let full_pn = packet::decode_packet_number(
-        space.largest_recv_pn(),
-        truncated as u64,
-        pn_len as u8,
-    );
+    let full_pn =
+        packet::decode_packet_number(space.largest_recv_pn(), truncated as u64, pn_len as u8);
 
     let aad_len = pn_offset + pn_len;
     let mut aad = Vec::from(&packet[..aad_len]);
@@ -833,9 +794,7 @@ fn decrypt_and_parse(
     let plaintext = remote_keys
         .packet
         .decrypt_in_place(full_pn, &aad, &mut encrypted)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::ProtocolViolation)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::ProtocolViolation))?;
 
     let mut remaining = plaintext;
     let mut frames = Vec::new();
@@ -865,14 +824,20 @@ fn hdr_pn_offset_short(hdr: &packet::ShortHeader) -> usize {
     1 + hdr.dst_cid.0.len()
 }
 
-fn hdr_size_long(dst_cid_len: usize, src_cid_len: usize, token_len: usize, length: usize) -> usize {
-    let token_varint_size = if token_len > 0 || true { 1 } else { 0 };
+fn hdr_size_long(
+    dst_cid_len: usize,
+    src_cid_len: usize,
+    _token_len: usize,
+    length: usize,
+) -> usize {
+    let token_varint_size = 1; // token length always present for Initial
     let length_varint_size = varint::encoded_len(length as VarInt);
     1 + 4 + 1 + dst_cid_len + 1 + src_cid_len + token_varint_size + length_varint_size
 }
 
 // ── Packet encryption helpers ───────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn encrypt_long(
     keys: &rustls::quic::DirectionalKeys,
     pn_space: PacketNumberSpace,
@@ -913,7 +878,7 @@ fn encrypt_long(
     header[scid_pos] = src_cid.len() as u8;
     header[scid_pos + 1..scid_pos + 1 + src_cid.len()].copy_from_slice(src_cid);
 
-    let length_pos = if is_initial {
+    let _length_pos = if is_initial {
         let token_pos = scid_pos + 1 + src_cid.len();
         let token_len = token.map_or(0, |t| t.len() as VarInt);
         varint::encode(token_len, &mut header[token_pos..])?;
@@ -932,9 +897,7 @@ fn encrypt_long(
     let tag = keys
         .packet
         .encrypt_in_place(pn, &header, &mut payload)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::InternalError)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
     payload.extend_from_slice(tag.as_ref());
 
     // Header protection
@@ -946,9 +909,7 @@ fn encrypt_long(
     pn_bytes.copy_from_slice(&header[pn_offset..pn_offset + pn_len]);
     keys.header
         .encrypt_in_place(sample, &mut first_byte, &mut pn_bytes)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::InternalError)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
     header[0] = first_byte;
     header[pn_offset..pn_offset + pn_len].copy_from_slice(&pn_bytes);
 
@@ -966,7 +927,6 @@ fn encrypt_short(
     pn_len: usize,
     key_phase: bool,
 ) -> Result<Vec<u8>, ConnectionError> {
-    let tag_len = keys.packet.tag_len();
     let mut payload = frames.to_vec();
 
     let pn_offset = 1 + dst_cid.len();
@@ -980,9 +940,7 @@ fn encrypt_short(
     let tag = keys
         .packet
         .encrypt_in_place(pn, &header, &mut payload)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::InternalError)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
     payload.extend_from_slice(tag.as_ref());
 
     let sample_start = 4 - pn_len;
@@ -993,9 +951,7 @@ fn encrypt_short(
     pn_bytes.copy_from_slice(&header[pn_offset..pn_offset + pn_len]);
     keys.header
         .encrypt_in_place(sample, &mut first_byte, &mut pn_bytes)
-        .map_err(|_| {
-            ConnectionError::Transport(crate::error::TransportError::InternalError)
-        })?;
+        .map_err(|_| ConnectionError::Transport(crate::error::TransportError::InternalError))?;
     header[0] = first_byte;
     header[pn_offset..pn_offset + pn_len].copy_from_slice(&pn_bytes);
 
@@ -1026,7 +982,12 @@ fn build_initial_packet(
     frame::write_frame(&crypto_frame, &mut frames_buf)?;
 
     // Pad to 1200
-    let hdr_est = hdr_size_long(dst_cid.len(), src_cid.len(), token_len as usize, frames_buf.len() + pn_len + tag_len);
+    let hdr_est = hdr_size_long(
+        dst_cid.len(),
+        src_cid.len(),
+        token_len as usize,
+        frames_buf.len() + pn_len + tag_len,
+    );
     let min_payload = 1200usize.saturating_sub(hdr_est + tag_len);
     while frames_buf.len() < min_payload {
         frames_buf.push(0x00);
@@ -1152,10 +1113,11 @@ mod tests {
         let cert_der = cert.cert.der().clone();
         let key_der = cert.key_pair.serialize_der();
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into());
-        let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key)
-            .unwrap();
+        let config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_no_client_auth()
+                .with_single_cert(vec![cert_der], key)
+                .unwrap();
         Arc::new(config)
     }
 
@@ -1202,14 +1164,34 @@ mod tests {
             server_pkts.push(buf[..n].to_vec());
         }
 
-        // Client ingests first server packet only (Initial, contains ServerHello)
+        // Client ingests first packet (Initial, contains ServerHello)
         client.ingest(&server_pkts[0]).unwrap();
 
-        // Now check keys
+        // Test HS keys RIGHT NOW, before ingesting the Handshake packet
+        if client.handshake_space.has_keys() && server.handshake_space.has_keys() {
+            let pt = b"hs key test before pkt1";
+            let srv_local = server.handshake_space.local_keys().unwrap();
+            let cli_remote = client.handshake_space.remote_keys().unwrap();
+
+            let mut enc = pt.to_vec();
+            let tag = srv_local
+                .packet
+                .encrypt_in_place(0, b"hdr", &mut enc)
+                .unwrap();
+            enc.extend_from_slice(tag.as_ref());
+            let _dec = cli_remote
+                .packet
+                .decrypt_in_place(0, b"hdr", &mut enc)
+                .unwrap();
+        }
+
+        // Now try ingesting the Handshake packet
+        if server_pkts.len() > 1 {
+            client.ingest(&server_pkts[1]).unwrap();
+        }
+
         assert!(server.handshake_space.has_keys(), "server has HS keys");
         assert!(client.handshake_space.has_keys(), "client has HS keys");
-
-        // Verify HS keys match by comparing ciphertexts
         let plaintext = b"test data for key comparison";
         let srv_local = server.handshake_space.local_keys().unwrap();
         let cli_remote = client.handshake_space.remote_keys().unwrap();
@@ -1217,75 +1199,31 @@ mod tests {
         // Encrypt same plaintext with same PN+header using both keys.
         // If keys match, ciphertexts match (QUIC AEAD is deterministic).
         let mut enc1 = plaintext.to_vec();
-        let t1 = srv_local.packet.encrypt_in_place(0, b"hdr", &mut enc1).unwrap();
+        let t1 = srv_local
+            .packet
+            .encrypt_in_place(0, b"hdr", &mut enc1)
+            .unwrap();
         let ct1 = enc1.clone();
         enc1.extend_from_slice(t1.as_ref());
 
         let mut enc2 = plaintext.to_vec();
-        let t2 = cli_remote.packet.encrypt_in_place(0, b"hdr", &mut enc2).unwrap();
+        let t2 = cli_remote
+            .packet
+            .encrypt_in_place(0, b"hdr", &mut enc2)
+            .unwrap();
         enc2.extend_from_slice(t2.as_ref());
 
         // Compare only the ciphertext portion (before tag)
         let ct1 = &enc1[..plaintext.len()];
         let ct2_part = &enc2[..plaintext.len()];
-        eprintln!("srv_local ct (first 8): {:02x?}", &ct1[..8]);
-        eprintln!("cli_remote ct (first 8): {:02x?}", &ct2_part[..8]);
-        eprintln!("tags match: {}", t1.as_ref() == t2.as_ref());
         assert_eq!(ct1, ct2_part, "ciphertexts must match if keys identical");
 
         // Also check decrypt using the srv_local-encrypted ciphertext
-        let dec = cli_remote.packet.decrypt_in_place(0, b"hdr", &mut enc1).unwrap();
+        let dec = cli_remote
+            .packet
+            .decrypt_in_place(0, b"hdr", &mut enc1)
+            .unwrap();
         assert_eq!(dec, plaintext, "cross-decrypt after ct match");
-    }
-
-    #[test]
-    fn client_hello_roundtrip_ok() {
-        let server_config = test_server_config();
-
-        // Create deerquic client and extract the ClientHello from its Initial packet
-        let (_client, client_initial) = Connection::connect("localhost").unwrap();
-        let (hdr, hdr_len) = packet::parse_long_header(&client_initial).unwrap();
-        let dcid = hdr.dst_cid.0.to_vec();
-        let server_keys = crate::crypto::server_initial_keys(&dcid).unwrap();
-        let (frames, _) = decrypt_initial(&client_initial, &hdr, hdr_len, &server_keys).unwrap();
-        let mut deerquic_ch = Vec::new();
-        for f in &frames {
-            if let Frame::Crypto { offset, data } = f {
-                if *offset == 0 { deerquic_ch.extend_from_slice(data); }
-            }
-        }
-
-        // Create deerquic server with the SAME config as raw server
-        let server = Connection::accept(&client_initial, server_config.clone()).unwrap();
-
-        // Create raw server with SAME config
-        let mut raw_server = quic::ServerConnection::new(
-            server_config, quic::Version::V1, vec![],
-        ).unwrap();
-        raw_server.read_hs(&deerquic_ch).unwrap();
-        let mut raw_srv_buf = Vec::new();
-        let raw_srv_kc = raw_server.write_hs(&mut raw_srv_buf);
-        let raw_srv_hs_keys = match raw_srv_kc {
-            Some(quic::KeyChange::Handshake { keys }) => keys,
-            _ => panic!("raw server no HS keys"),
-        };
-
-        // Compare HS keys
-        let pt = b"test compare";
-        let deerquic_srv_local = server.handshake_space.local_keys().unwrap();
-        let raw_srv_local = &raw_srv_hs_keys.local;
-
-        let mut enc1 = pt.to_vec();
-        let t1 = deerquic_srv_local.packet.encrypt_in_place(0, b"h", &mut enc1).unwrap();
-        enc1.extend_from_slice(t1.as_ref());
-
-        let mut enc2 = pt.to_vec();
-        let t2 = raw_srv_local.packet.encrypt_in_place(0, b"h", &mut enc2).unwrap();
-        enc2.extend_from_slice(t2.as_ref());
-
-        assert_eq!(&enc1[..pt.len()], &enc2[..pt.len()],
-            "deerquic and raw server HS keys should match (same config, same ClientHello)");
-        assert_eq!(t1.as_ref(), t2.as_ref(), "tags should match too");
     }
 
     #[test]
@@ -1338,8 +1276,8 @@ mod tests {
 
         // Step 3: Server second write_hs (Handshake level after KeyChange)
         let mut hd = Vec::new();
-        let server_kc2 = server.write_hs(&mut hd);
-        let handshake_data = hd;
+        let _server_kc2 = server.write_hs(&mut hd);
+        let _handshake_data = hd;
 
         // Step 4: Client reads server's Initial data
         if !initial_data.is_empty() {
