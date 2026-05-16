@@ -55,20 +55,18 @@ export SAVE_FILES="${interop_save_files}"
 
 # Make the runner aware of deerquic
 cat > implementations_quic.json <<JSON
-[
-  {
-    "name": "deerquic",
+{
+  "deerquic": {
     "image": "deerquic-interop:latest",
     "url": "https://github.com/minhuw/deerquic",
     "role": "both"
   },
-  {
-    "name": "${interop_peer_impl}",
+  "${interop_peer_impl}": {
     "image": "${interop_peer_image}",
     "url": "",
     "role": "both"
   }
-]
+}
 JSON
 
 # Run subset of testcases
