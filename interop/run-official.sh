@@ -30,10 +30,9 @@ if [ -n "${interop_runner_ref}" ]; then
   git checkout FETCH_HEAD
 fi
 
-# Build deerquic Docker image
+# Build deerquic Docker image (multi-stage: compiles inside container)
 echo "Building deerquic interop image..."
 cd "${repo_root}"
-cargo build --release --bin deerquic-interop
 docker build -t deerquic-interop:latest -f interop/Dockerfile .
 
 # Install runner Python dependencies
