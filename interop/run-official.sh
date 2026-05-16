@@ -36,8 +36,13 @@ cd "${repo_root}"
 cargo build --release --bin deerquic-interop
 docker build -t deerquic-interop:latest -f interop/Dockerfile .
 
-# Run interop tests
+# Install runner Python dependencies
 cd "${runner_dir}"
+if [ -f requirements.txt ]; then
+  pip3 install --quiet -r requirements.txt
+fi
+
+# Run interop tests
 export CLIENT="${interop_peer_impl}"
 export SERVER="${interop_peer_impl}"
 export CLIENT_IMAGE="${interop_peer_image}"
