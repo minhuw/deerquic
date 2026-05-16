@@ -169,6 +169,8 @@ fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
                             }
                             let be = server.backend_mut();
                             let _ = be.send(&buf[..out_n]);
+                            // Pace sends to not overflow the simulator queue (25 packets)
+                            std::thread::sleep(Duration::from_millis(2));
                         }
                     }
                 }
