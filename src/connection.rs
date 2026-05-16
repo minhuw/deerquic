@@ -474,25 +474,22 @@ impl Connection {
                 Frame::Ack { .. } => {
                     // TODO: process ACK for loss detection
                 }
-                Frame::Crypto { offset, data } => {
-                    if level <= 2 {
-                        let expected = self.crypto_recv_offset[level];
-                        if *offset == expected {
-                            // Feed to TLS directly (bypass feed_tls)
-                            match &mut self.tls {
-                                quic::Connection::Client(conn) => conn.read_hs(data)?,
-                                quic::Connection::Server(conn) => conn.read_hs(data)?,
-                            }
-                            let mut out_buf = Vec::new();
-                            let kc = match &mut self.tls {
-                                quic::Connection::Client(conn) => conn.write_hs(&mut out_buf),
-                                quic::Connection::Server(conn) => conn.write_hs(&mut out_buf),
-                            };
-                            let (crypto_out, new_keys) =
-                                process_tls_output(Some((out_buf, kc)), level);
-                            self.handle_crypto_output(crypto_out, new_keys, level)?;
-                            self.crypto_recv_offset[level] += data.len() as u64;
+                Frame::Crypto { offset, data } if level <= 2 => {
+                    let expected = self.crypto_recv_offset[level];
+                    if *offset == expected {
+                        // Feed to TLS directly (bypass feed_tls)
+                        match &mut self.tls {
+                            quic::Connection::Client(conn) => conn.read_hs(data)?,
+                            quic::Connection::Server(conn) => conn.read_hs(data)?,
                         }
+                        let mut out_buf = Vec::new();
+                        let kc = match &mut self.tls {
+                            quic::Connection::Client(conn) => conn.write_hs(&mut out_buf),
+                            quic::Connection::Server(conn) => conn.write_hs(&mut out_buf),
+                        };
+                        let (crypto_out, new_keys) = process_tls_output(Some((out_buf, kc)), level);
+                        self.handle_crypto_output(crypto_out, new_keys, level)?;
+                        self.crypto_recv_offset[level] += data.len() as u64;
                     }
                 }
                 Frame::ConnectionClose {
@@ -506,11 +503,10 @@ impl Connection {
                             .unwrap_or(crate::error::TransportError::InternalError),
                     ));
                 }
-                Frame::HandshakeDone => {
-                    if self.side == Side::Client {
-                        self.state = State::Established;
-                    }
+                Frame::HandshakeDone if self.side == Side::Client => {
+                    self.state = State::Established;
                 }
+                Frame::HandshakeDone => {} // server ignores
                 Frame::Stream { data, .. } => {
                     self.received_app_data.extend_from_slice(data);
                 }
