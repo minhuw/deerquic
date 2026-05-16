@@ -109,27 +109,60 @@ fn run_server(cert_path: &str, key_path: &str) -> io::Result<()> {
     writeln!(log, "handshake complete")?;
 
     if tc == "transfer" {
-        // Receive data from client
-        let mut recv_buf = [0u8; 4096];
-        for _retry in 0..100 {
-            let _ = server.step(100);
-            let n = server.conn_mut().recv_data(&mut recv_buf);
-            if n > 0 {
-                let msg = std::str::from_utf8(&recv_buf[..n]).unwrap_or("?");
-                writeln!(log, "received: {msg}")?;
-                // Echo back
-                server.conn_mut().send_data(msg.as_bytes());
-                loop {
-                    let out_n = server.conn_mut().egest(&mut buf).unwrap_or(0);
-                    if out_n == 0 {
-                        break;
-                    }
-                    let be = server.backend_mut();
-                    let _ = be.send(&buf[..out_n]);
+        let docroot = env::var("DOCUMENT_ROOT").unwrap_or_else(|_| "/www".into());
+        // Handle multiple requests (the runner sends several)
+        loop {
+            let mut req_buf = [0u8; 2048];
+            let req = loop {
+                let _ = server.step(100);
+                let n = server.conn_mut().recv_data(&mut req_buf);
+                if n > 0 {
+                    break std::str::from_utf8(&req_buf[..n])
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                 }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+
+            if req.is_empty() {
+                writeln!(log, "empty request, done")?;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
+
+            // HTTP/0.9: "GET /path\r\n"
+            let path = req
+                .strip_prefix("GET /")
+                .unwrap_or(&req)
+                .trim_end_matches('\r')
+                .trim_end_matches('\n')
+                .to_string();
+
+            let file_path = format!("{docroot}/{path}");
+            writeln!(log, "request: {req:?} -> serving {file_path}")?;
+
+            match fs::read(&file_path) {
+                Ok(data) => {
+                    writeln!(log, "  serving {} bytes", data.len())?;
+                    // Send in small chunks to fit within QUIC packet limits
+                    const CHUNK: usize = 1024;
+                    for chunk in data.chunks(CHUNK) {
+                        server.conn_mut().send_data(chunk);
+                        // Flush until egest is empty
+                        loop {
+                            let out_n = server.conn_mut().egest(&mut buf).unwrap_or(0);
+                            if out_n == 0 {
+                                break;
+                            }
+                            let be = server.backend_mut();
+                            let _ = be.send(&buf[..out_n]);
+                        }
+                    }
+                }
+                Err(e) => {
+                    writeln!(log, "  file not found: {e}")?;
+                }
+            }
         }
     }
 
@@ -175,32 +208,57 @@ fn run_client(host: &str, port: u16) -> io::Result<()> {
     writeln!(log, "handshake complete")?;
 
     if tc == "transfer" {
-        let msg = b"hello deerquic\n";
-        writeln!(log, "sending: {}", std::str::from_utf8(msg).unwrap())?;
-        client.conn_mut().send_data(msg);
+        let dl_root = env::var("DOWNLOAD_ROOT").unwrap_or_else(|_| "/downloads".into());
+        let requests = env::var("REQUESTS").unwrap_or_default();
 
-        // Flush egress
-        let mut sbuf = [0u8; 2048];
-        loop {
-            let n = client.conn_mut().egest(&mut sbuf).unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            let be = client.backend_mut();
-            let _ = be.send(&sbuf[..n]);
-        }
+        writeln!(log, "transfer: REQUESTS={requests}")?;
 
-        // Wait for echo
-        let mut recv_buf = [0u8; 4096];
-        for _retry in 0..100 {
-            let _ = client.step(100);
-            let n = client.conn_mut().recv_data(&mut recv_buf);
-            if n > 0 {
-                let echo = std::str::from_utf8(&recv_buf[..n]).unwrap_or("?");
-                writeln!(log, "received echo: {echo}")?;
-                break;
+        for req_url in requests.split_whitespace() {
+            // e.g. "https://server/file1"
+            let path = req_url.splitn(4, '/').nth(3).unwrap_or("index.html");
+
+            let req_line = format!("GET /{path}\r\n");
+            writeln!(log, "requesting: {req_line:?}")?;
+            client.conn_mut().send_data(req_line.as_bytes());
+
+            // Flush egress
+            let mut sbuf = [0u8; 2048];
+            loop {
+                let n = client.conn_mut().egest(&mut sbuf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let be = client.backend_mut();
+                let _ = be.send(&sbuf[..n]);
             }
-            std::thread::sleep(Duration::from_millis(50));
+
+            // Receive response (wait for data with timeout)
+            let mut data = Vec::new();
+            let mut silence = 0u32;
+            let mut rbuf = [0u8; 16384];
+            loop {
+                let _ = client.step(100);
+                let n = client.conn_mut().recv_data(&mut rbuf);
+                if n > 0 {
+                    data.extend_from_slice(&rbuf[..n]);
+                    silence = 0;
+                } else {
+                    silence += 1;
+                    if silence > 30 {
+                        // 3 seconds of silence = transfer done
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+
+            // Save to download directory
+            let save_path = format!("{dl_root}/{path}");
+            if let Some(parent) = std::path::Path::new(&save_path).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(&save_path, &data)?;
+            writeln!(log, "saved {} bytes to {save_path}", data.len())?;
         }
     }
 

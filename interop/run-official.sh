@@ -70,13 +70,15 @@ cat > implementations_quic.json <<JSON
 JSON
 
 # Run subset of testcases
+failed=0
+
 python3 run.py \
   -c "deerquic" \
   -s "${interop_peer_impl}" \
   -t "${interop_testcases}" \
   -l "${log_root}/deerquic_client_${interop_peer_impl}_server" \
   -f "${interop_save_files}" \
-  || true
+  || failed=1
 
 python3 run.py \
   -c "${interop_peer_impl}" \
@@ -84,6 +86,11 @@ python3 run.py \
   -t "${interop_testcases}" \
   -l "${log_root}/${interop_peer_impl}_client_deerquic_server" \
   -f "${interop_save_files}" \
-  || true
+  || failed=1
 
 echo "Interop run complete. Logs at ${log_root}"
+
+if [ "${failed}" = "1" ]; then
+  echo "Some interop tests failed"
+  exit 1
+fi
