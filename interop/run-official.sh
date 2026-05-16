@@ -73,19 +73,19 @@ JSON
 
 # Run subset of testcases
 python3 run.py \
-  --client "deerquic" \
-  --server "${interop_peer_impl}" \
-  --testcase "${interop_testcases}" \
-  --log-dir "${log_root}/deerquic_client_${interop_peer_impl}_server" \
-  --save-files "${interop_save_files}" \
+  -c "deerquic" \
+  -s "${interop_peer_impl}" \
+  -t "${interop_testcases}" \
+  -l "${log_root}/deerquic_client_${interop_peer_impl}_server" \
+  -f "${interop_save_files}" \
   || true
 
 python3 run.py \
-  --client "${interop_peer_impl}" \
-  --server "deerquic" \
-  --testcase "${interop_testcases}" \
-  --log-dir "${log_root}/${interop_peer_impl}_client_deerquic_server" \
-  --save-files "${interop_save_files}" \
+  -c "${interop_peer_impl}" \
+  -s "deerquic" \
+  -t "${interop_testcases}" \
+  -l "${log_root}/${interop_peer_impl}_client_deerquic_server" \
+  -f "${interop_save_files}" \
   || true
 
 echo "Interop run complete. Logs at ${log_root}"
