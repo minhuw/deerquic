@@ -24,10 +24,12 @@ pub struct Space {
 
     /// Time of the last received packet in this space.
     last_recv_time: Option<Instant>,
+
+    /// Packet numbers received that need acknowledgement.
+    pending_acks: Vec<u64>,
 }
 
 impl Space {
-    /// Create a new, empty space (no keys yet).
     pub fn new(id: PacketNumberSpace) -> Self {
         Self {
             id,
@@ -35,55 +37,54 @@ impl Space {
             next_send_pn: 0,
             largest_recv_pn: 0,
             last_recv_time: None,
+            pending_acks: Vec::new(),
         }
     }
 
-    /// Install keys for this space.
     pub fn set_keys(&mut self, keys: Keys) {
         self.keys = Some(keys);
     }
 
-    /// Borrow the local (send) keys.
     pub fn local_keys(&self) -> Option<&DirectionalKeys> {
         self.keys.as_ref().map(|k| &k.local)
     }
 
-    /// Borrow the remote (recv) keys.
     pub fn remote_keys(&self) -> Option<&DirectionalKeys> {
         self.keys.as_ref().map(|k| &k.remote)
     }
 
-    /// Whether keys have been installed.
     pub fn has_keys(&self) -> bool {
         self.keys.is_some()
     }
 
-    /// Take the next send packet number and advance the counter.
     pub fn next_send_pn(&mut self) -> u64 {
         let pn = self.next_send_pn;
         self.next_send_pn += 1;
         pn
     }
 
-    /// Peek at the next send packet number without advancing.
     pub fn peek_send_pn(&self) -> u64 {
         self.next_send_pn
     }
 
-    /// Largest received authenticated packet number so far.
     pub fn largest_recv_pn(&self) -> u64 {
         self.largest_recv_pn
     }
 
-    /// Record a received packet number.
+    /// Record a received packet number and schedule an ACK.
     pub fn record_recv_pn(&mut self, pn: u64) {
         if pn > self.largest_recv_pn {
             self.largest_recv_pn = pn;
         }
+        self.pending_acks.push(pn);
         self.last_recv_time = Some(Instant::now());
     }
 
-    /// Time since the last received packet (None if never received).
+    /// Take all pending ACK packet numbers, clearing the list.
+    pub fn take_pending_acks(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.pending_acks)
+    }
+
     pub fn time_since_last_recv(&self) -> Option<std::time::Duration> {
         self.last_recv_time.map(|t| t.elapsed())
     }
