@@ -30,16 +30,20 @@ fn is_supported(tc: &str) -> bool {
 }
 
 fn load_server_config(cert_path: &str, key_path: &str) -> io::Result<Arc<rustls::ServerConfig>> {
+    use rustls::pki_types::pem::PemObject;
+
     let cert_pem = fs::read(cert_path)?;
     let key_pem = fs::read(key_path)?;
 
-    let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<Result<_, _>>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let certs: Vec<rustls::pki_types::CertificateDer> =
+        rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key"))?;
+    let key = rustls::pki_types::PrivateKeyDer::pem_slice_iter(&key_pem)
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key"))?
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(Arc::new(
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
